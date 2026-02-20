@@ -28,15 +28,25 @@ No code required. We want a **clear, practical proposal** with architecture and 
 
 # Approach Comparison
 ## 1. Cloud / SaaS-Based Solution
+**How it works:** Upload videos to an AI-powered SaaS platform (e.g. Grain, Otter.ai, Fireflies, AssemblyAI video pipeline). The platform handles transcription, summarisation, and chapter generation automatically through its hosted API.
+
 ### Architecture
 ```
 Local Video → Upload → SaaS Transcription → SaaS Summarization → Export → Post-processing
 ```
+| Stage            | SaaS Provider Workflow |
+| ---------------- | ---------------------- |
+| Upload           | Videos uploaded via API or web UI to the SaaS provider. |
+| Transcription    | Provider's ASR engine (e.g., Whisper-based) generates time-coded transcript. |
+| Summarisation    | Provider's LLM layer produces summary and highlights with timestamps. |
+| Asset Extraction | Limited: some tools export clip URLs; screenshots not always supported. |
+| Output           | JSON / Markdown export via provider API. Custom folder structure requires post-processing script. |
+
+
 ### Pros
 * Fastest to implement
 * High ASR quality
 * Minimal infrastructure
-  
 ### Cons
 * High per-minute cost for 3–4 hour videos
 * Privacy concerns (videos leave local environment)
@@ -47,9 +57,10 @@ Local Video → Upload → SaaS Transcription → SaaS Summarization → Export 
 ### Best For
 Small, non-sensitive workloads where speed matters more than cost control.
 
-## 2. Hybrid Architecture
+## 2. Hybrid Solution
 Local media processing + Cloud LLM for structured summarization
-### High-Level Pipeline
+**How it works**: All media processing (transcription, clip cutting, screenshot extraction) runs locally using open-source tools (Whisper, FFmpeg, OpenCV). Only the text transcript is sent to a cloud LLM (OpenAI GPT-4o / Gemini 1.5 Pro) for intelligent summarisation and highlight detection. This is my recommended approach.
+### High-Level Architecture
 ```
 Batch Orchestrator
     ↓
@@ -71,6 +82,20 @@ Screenshot Extraction
     ↓
 Markdown + Report Generation
 ```
+
+| #  | Stage                     | Description |
+|----|----------------------------|-------------|
+| 1  | Ingest                     | Folder watcher detects new video files → adds to SQLite job queue with status INGESTED |
+| 2  | Proxy Generation           | FFmpeg transcodes to 480p proxy (libx264 veryfast). Used for all frame sampling & screenshots. Original preserved for final clip cuts only. Saves 60–80% CPU vs processing at source resolution. |
+| 3  | Audio Extraction           | FFmpeg extracts audio track to mono 16 kHz WAV — optimal format for Whisper input. |
+| 4  | Transcription              | faster-whisper (large-v3, GPU). Produces word-level timestamped JSON. Batch mode: multiple videos transcribed concurrently. Status → TRANSCRIBED. |
+| 5  | Sliding Window Chunk       | Transcript split into 20–30 min chunks with 1–2 min overlap at silence boundaries. Word timestamps preserved across chunks. |
+| 6  | Chunk Summarisation        | Each chunk → GPT-4o / Gemini 1.5 Pro (async, parallel calls). Returns structured JSON per chunk: chapter title, highlight timestamps, key points, confidence score. Status → CHUNK_SUMMARIZED. |
+| 7  | Meta-Summary Pass          | All chunk JSONs merged → second LLM call produces unified highlight ranking. Deduplicates overlapping highlights (±30 s window). Enforces minimum clip duration. Status → META_SUMMARIZED. |
+| 8  | Clip Extraction            | FFmpeg stream-copies highlight segments from original (full-res) video using precise start/end timestamps (±30 s padding). Lossless, fast. Status → CLIPPED. |
+| 9  | Screenshot Extraction      | FFmpeg -ss -vframes 1 on proxy file extracts keyframe JPG at each highlight timestamp. Fast single-frame decode. Status → SCREENSHOTS_DONE. |
+| 10 | Summary Build              | Summary.md assembled from meta-summary JSON + relative asset paths. processing_report.json written with token usage, cost estimate, stage timings. Status → COMPLETED. |
+
 ### Production Optimizations
 1. **Bitrate Laddering (Compute Optimization)**
    Instead of processing full-resolution video:
@@ -128,6 +153,7 @@ This improves trust and usability.
    * Temperature = 0 for deterministic JSON
    * Strict JSON schema enforcement
    * Avoid verbose model outputs
+     
 Estimated cost per 3-hour video:
 *~$1–3 depending on model and chunk count*
 
@@ -151,7 +177,26 @@ Estimated cost per 3-hour video:
 * SCREENSHOTS_DONE
 * COMPLETED
 * FAILED
-If interrupted, the system resumes from last completed stage.
+ 
+If the pipeline is interrupted at any stage, the batch orchestrator resumes from the last completed stage — no reprocessing of already-finished steps
+```
+INGESTED
+   ↓
+PROXY_GENERATED 
+   ↓
+TRANSCRIBED
+   ↓
+CHUNK_SUMMARIZED
+   ↓
+META_SUMMARIZED 
+   ↓
+CLIPPED
+   ↓
+SCREENSHOTS_DONE → FAILED (resumable from last stage)
+   ↓
+COMPLETED 
+                                                                                    
+```
 
 6. **Observability & Cost Reporting**
    Each video generates:
@@ -187,11 +232,28 @@ output/<video_name>/
     ├── highlight_01.jpg
     └── highlight_02.jpg
 ```
-## 3. Fully Offline Architecture
+## 3. Fully Offline Solution
 All components run locally:
 * Transcription: faster-whisper
 * LLM: LLaMA / Mistral (via Ollama or llama.cpp)
 * Media: FFmpeg
+### Architecture
+| Component        | Fully Offline (Approach 3) Description |
+|------------------|----------------------------------------|
+| Transcription    | faster-whisper (large-v3) on GPU — same as Approach 2. |
+| LLM              | Local model served via Ollama or llama.cpp. Recommended models: Llama-3.1 70B (if GPU VRAM ≥ 48 GB) or Mistral-7B / Gemma-2 27B for lighter setups. |
+| Prompt           | Same chunked approach as Approach 2. JSON output enforced via grammar-constrained decoding (llama.cpp grammar / Ollama `format: json`). |
+| Video Processing | FFmpeg + OpenCV — identical to Approach 2. |
+| Limitations      | Local LLM quality is lower than GPT-4o for complex summarisation, especially for domain-specific or technical content. |
+
+## Model Selection by Hardware
+| GPU VRAM                     | Recommended Model              | Quality vs Hybrid            | Throughput (3-hr video) |
+|-------------------------------|--------------------------------|------------------------------|--------------------------|
+| ≥ 48 GB (A100 / H100)        | Llama-3.1 70B (Q4)             | ~85% of GPT-4o quality       | ~20 min                  |
+| 24–48 GB (A40 / 3090)        | Gemma-2 27B (Q4)               | ~75% of GPT-4o quality       | ~35 min                  |
+| 12–24 GB (4090 / 3080)       | Mistral-7B or Phi-3 Mini       | ~60–65% of GPT-4o quality    | ~50 min                  |
+| < 12 GB                      | Not recommended                | Quality insufficient for production | —                |
+
 
 ### Pros
 * Maximum privacy
@@ -201,6 +263,7 @@ All components run locally:
 * Requires strong GPU
 * Lower summarization quality vs GPT-4 class models
 * Higher setup complexity
+  
 ### JSON Reliability Note
 Local LLMs (LLaMA/Mistral) are less reliable at strict JSON output than GPT-4 class models.
 Mitigation: Use **grammar-constrained decoding** to enforce schema at the token level:
@@ -208,6 +271,9 @@ Mitigation: Use **grammar-constrained decoding** to enforce schema at the token 
 - **Ollama**: use `format: "json"` in the API call
 
 This ensures the offline pipeline produces parseable output without post-processing fallbacks.
+
+> [!NOTE]
+> When to choose Offline: Regulated or confidential content (legal, medical, financial) where no data upload is permitted, and the organisation owns ≥ 24 GB VRAM GPU hardware. Expect ~75–85% of Hybrid quality at the cost of higher setup complexity.
 ### Decision Matrix
 
 | Factor               | SaaS     | Hybrid (Recommended) | Offline            |
