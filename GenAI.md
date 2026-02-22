@@ -274,6 +274,7 @@ This ensures the offline pipeline produces parseable output without post-process
 
 > [!NOTE]
 > When to choose Offline: Regulated or confidential content (legal, medical, financial) where no data upload is permitted, and the organisation owns ≥ 24 GB VRAM GPU hardware. Expect ~75–85% of Hybrid quality at the cost of higher setup complexity.
+
 ### Decision Matrix
 
 | Factor               | SaaS     | Hybrid (Recommended) | Offline            |
@@ -302,9 +303,185 @@ Design a **single zero-shot prompt** that takes a user’s persona configuration
 
 **TASK:** Write a prompt that can work.
 
-### Your Solution for problem 2:
+### Problem 2 — Zero-Shot Prompt: LinkedIn Post Generator
 
-You need to put your solution here.
+A single prompt call (no fine-tuning, no multi-turn) that accepts a user persona configuration + a topic and returns 3 structurally distinct, LinkedIn-ready post drafts as directly parseable JSON.
+
+## Design Decisions
+| Decision | Rationale |
+|----------|-----------|
+| Structured Output | Prompt mandates a strict JSON schema. The app calls `JSON.parse()` directly — no regex scraping, no free-text post-processing. |
+| Zero-Shot Reliability | Explicit constraints + a worked schema example (few-shot schema, not few-shot content) reduces hallucination risk without inflating token cost with full examples. |
+| Style Separation | Three named styles are defined with concrete structural rules and hard word count bounds. Prevents the model returning three tonal variations of the same structure. |
+| Enum-Constrained Style Field ▸ NEW | The `style` field in the JSON schema is shown as an enum directly inside the schema definition — not just mentioned in the rules. The model sees allowed values where it fills them in, which is more reliable than a rule listed elsewhere. |
+| Persona Injection | All persona fields injected as a typed, structured block with inline examples. Avoids vague “write in my voice” instructions that models routinely under-follow. |
+| Do/Don't Enforcement | `do_rules` and `dont_rules` serialised as numbered lists. LLMs comply more reliably with numbered constraints than free-form narrative instructions. |
+| Hallucination Guard | Explicit ban: the model must not invent statistics, quotes, or external references unless they appear in `topic_context`. Named specifically, not bundled into a general “be accurate” instruction. |
+| API-Level JSON Enforcement | In addition to prompt instructions, the API call itself enforces JSON mode: `response_format: { type: 'json_object' }` (OpenAI) or `responseMimeType: 'application/json'` (Gemini). Prompt + API constraint together eliminate malformed output. |
+
+## The Prompt
+### SYSTEM PROMPT
+```
+You are a professional LinkedIn ghostwriter and content strategist.
+Your only job is to produce valid JSON — nothing else.
+Do not include any text, explanation, or markdown outside the JSON object.
+Do not wrap the output in code fences.
+ 
+Your output must always be a single JSON object matching this exact schema:
+ 
+{
+  "posts": [
+    {
+      "style":               "punchy_insight | narrative_story | actionable_checklist",
+      "hook":                "<opening line — the sentence that stops the scroll>",
+      "body":                "<full post body — use \n\n for paragraph breaks>",
+      "cta":                 "<closing call-to-action line>",
+      "hashtags":            ["<tag1>", "<tag2>", "<tag3>"],
+      "estimated_word_count": <integer>,
+      "style_notes":         "<one sentence explaining the structural choice>"
+    }
+  ]
+}
+ 
+Rules you must follow at all times:
+1. Return exactly 3 post objects — no more, no fewer.
+2. Each post must use one of these exact style values:
+   "punchy_insight"  |  "narrative_story"  |  "actionable_checklist"
+   Each style value must appear exactly once across the 3 posts.
+3. Do not add extra keys to the schema.
+4. Never invent statistics, case study numbers, quotes, or external references
+   unless they were explicitly provided in the topic_context field.
+5. Obey every item in do_rules and dont_rules without exception.
+6. Each post must be meaningfully different in structure — not just tone.
+   A reader must instantly recognise which style they are reading.
+7. LinkedIn formatting: use \n\n between paragraphs. No markdown headers.
+   Emojis only if emoji_preference is 'yes' or 'sometimes'.
+8. All three posts must be ready to publish — no [brackets], no placeholders.
+```
+
+### STYLE DEFINITIONS (part of system prompt)
+```
+STYLE 1 — "punchy_insight"
+  Structure:
+  - Hook: one strong declarative sentence.
+  - 3–5 very short paragraphs (1–2 lines each).
+  - White space between every paragraph. No story arc. No list.
+  - End with a thought-provoking question or sharp closing statement.
+  - Target: under 150 words.
+ 
+STYLE 2 — "narrative_story"
+  Structure:
+  - Hook opens mid-scene (in medias res — present tense).
+  - 2–3 paragraph arc: situation → tension/realisation → outcome/lesson.
+  - Transition to broader takeaway (1 paragraph).
+  - CTA asks the reader to share their own experience.
+  - Target: 180–250 words.
+ 
+STYLE 3 — "actionable_checklist"
+  Structure:
+  - Hook states a clear value promise ("5 things I learned about X").
+  - Numbered list of 4–6 items.
+  - Each item: bold short label + 1–2 sentence explanation.
+  - Closing paragraph ties the list to the user's broader expertise.
+  - CTA drives a save or share action.
+  - Target: 200–280 words.
+```
+
+### USER PROMPT (filled per API call)
+```
+Generate 3 LinkedIn post drafts using the persona and topic below.
+ 
+=== PERSONA ===
+name:                    {{name}}
+professional_background: {{background}}
+current_role:            {{current_role}}
+industry:                {{industry}}
+tone:                    {{tone}}
+  (e.g. "conversational and warm" | "authoritative and direct" | "humble and reflective")
+language_style:          {{language_style}}
+  (e.g. "plain English, no jargon" | "industry terms welcome" | "bilingual EN/HI mix")
+typical_post_length:     {{length_preference}}
+  (e.g. "short and punchy < 150 words" | "medium 150–250 words" | "long-form")
+emoji_preference:        {{emoji_preference}}
+  (yes | no | sometimes)
+audience:                {{audience}}
+  (e.g. "startup founders" | "engineering students" | "HR professionals")
+ 
+do_rules:
+{{numbered list of do rules}}
+ 
+dont_rules:
+{{numbered list of dont rules}}
+ 
+=== TOPIC ===
+topic:         {{topic}}
+topic_context: {{optional: key points, personal anecdotes, data to include}}
+goal:          {{goal}}
+  (e.g. "build thought leadership" | "drive profile visits" | "encourage comments")
+ 
+=== INSTRUCTIONS ===
+- Follow all system rules strictly.
+- Produce exactly 3 posts — one per style.
+- Return only the JSON object. No other text.
+```
+
+## API Call Configuration
+The prompt alone is not sufficient — the API call must also enforce JSON mode. Both layers together make malformed output practically impossible.
+
+### OpenAI 
+```
+const response = await openai.chat.completions.create({
+  model: "gpt-4o",
+  response_format: { type: 'json_object' },   // ← API-level JSON enforcement
+  temperature: 0,                              // ← deterministic output
+  messages: [
+    { role: "system", content: SYSTEM_PROMPT },
+    { role: "user",   content: buildUserPrompt(persona, topic) }
+  ]
+});
+const posts = JSON.parse(response.choices[0].message.content).posts;
+```
+
+### Gemini
+```
+const response = await model.generateContent({
+  generationConfig: {
+    responseMimeType: "application/json",      // ← API-level JSON enforcement
+    temperature: 0,
+  },
+  contents: [{ role: 'user', parts: [{ text: FULL_PROMPT }] }]
+});
+const posts = JSON.parse(response.response.text()).posts;
+```
+> [!Note]
+> **Why both layers?** Prompt instructions tell the model what to do. API json_mode enforces it at the token-sampling level — the model cannot physically emit a non-JSON token. One layer without the other leaves a gap.
+
+## Sample Filled Persona (Reference)
+| Field | Value |
+|-------|-------|
+| name | Priya Nair |
+| current_role | Senior Product Manager at a B2B SaaS startup |
+| industry | Product Management / B2B SaaS |
+| tone | Conversational, warm, occasionally vulnerable |
+| language_style | Plain English, light PM terminology, zero buzzwords |
+| emoji_preference | Sometimes — max 2 per post |
+| audience | Early-career PMs, startup founders, product enthusiasts |
+| do_rules | 1. Share real personal experiences. <br> 2. Use specific details when available. <br> 3. End with a question that invites discussion. |
+| dont_rules | 1. No corporate jargon. <br> 2. No humblebrag tone. <br> 3. Never claim expertise not earned. <br> 4. Avoid passive voice. |
+| topic | Why saying no is the most important product skill |
+| topic_context | Recently declined a high-visibility feature request from the CEO. The team thanked me later. No external stats — personal experience only. |
+| goal | Build thought leadership; encourage PMs to comment with their own "no" stories |
+
+## Why This Prompt Is Reliable
+| Property | How It Is Achieved |
+|----------|--------------------|
+| Schema-first design | JSON schema is defined before any content rules. The model anchors its output format before reading persona or topic. |
+| Enum in schema (not just rules) | `style` field shows allowed values inline: `punchy_insight \| narrative_story \| actionable_checklist`. Model sees the constraint exactly where it writes the value. |
+| Hard structural differentiation | Each style has mutually exclusive structural rules (word count, format, arc type). Three tonal variations of the same structure are structurally impossible. |
+| Named hallucination ban | Rule 4 specifically bans invented statistics, numbers, quotes, and external references — not a vague “be accurate” instruction. |
+| Typed persona fields | Each field includes an inline example value. Reduces misinterpretation of abstract descriptors like `tone` or `language_style`. |
+| API + prompt JSON enforcement | `response_format` / `responseMimeType` enforces JSON at the token level. `JSON.parse()` on the raw completion — no stripping, no regex, no fallback parser. |
+| Temperature = 0 | Deterministic output. Same persona + topic always produces structurally consistent drafts. Avoids creative drift between calls. |
 
 ## Problem 3: **Smart DOCX Template → Bulk DOCX/PDF Generator (Proposal + Prompt)**
 
