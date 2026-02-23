@@ -564,11 +564,11 @@ Each object in the array must match this schema exactly:
  
 Rules:
 1. Only extract values that realistically differ per document instance.
-   >(names, dates, amounts, roles, addresses, IDs)
+   (names, dates, amounts, roles, addresses, IDs)
 2. Do NOT extract: document title, company name, static boilerplate,
-   >unless they explicitly vary per instance.
+   unless they explicitly vary per instance.
 3. If a value appears multiple times (e.g. candidate name in greeting AND signature), set appears_multiple_times: true.
-   >The system will replace all occurrences.
+   The system will replace all occurrences.
 4. Return the JSON array only. No other text.
 ```
 ### Step 3 — Schema Confirmation UI
@@ -846,7 +846,7 @@ After each episode is generated and approved, the system writes a short continui
 |-------|------------|
 | Input | Generated script JSON. |
 | Process | Second LLM pass produces a shot list. One or more shots per scene. Each shot: `shot_type` (wide/medium/close-up/reaction), `camera_movement` (static/pan/zoom), `characters_in_frame`, `background_description`, `mood/lighting`. Separates narrative logic from visual composition. |
-|| Output | Shot list JSON attached to the episode package. Each shot becomes one image generation call in Stage 3. |
+| Output | Shot list JSON attached to the episode package. Each shot becomes one image generation call in Stage 3. |
 
 ### Stage 3 — Visual Asset Generation
 | Stage | Description |
