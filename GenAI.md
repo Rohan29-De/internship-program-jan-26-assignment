@@ -713,4 +713,233 @@ Create a **small, clear architecture proposal** (no code, no prompts) describing
 
 ### Your Solution for problem 4:
 
-You need to put your solution here.
+## Problem 4 — Character-Based 5-Min Episode Video Series Generator
+
+Users define a cast of characters once with reference images, personality, voice profiles, and relationships. For each new episode, the user provides a short story prompt. The system generates a complete episode package: script, storyboard, visual assets, audio, and a final rendered video, while maintaining character consistency across every episode in the series.
+
+## System Overview: Two-Phase Design
+| Phase | Description |
+|-------|------------|
+| A — Series Bible Setup (one-time) | Character definition, relationship graph, world/style rules. Stored as versioned JSON. Injected into every episode generation call as the single source of truth. |
+| B — Episode Generation (per episode) | User provides a short story prompt → system runs a 5-stage pipeline: Script → Storyboard → Visuals → Audio → Video Assembly. Each stage is an independent service. |
+
+```
+PHASE A (one-time)                    PHASE B (per episode)
+─────────────────────                 ──────────────────────────────────────────
+Character Setup                       Episode Prompt
+    ↓                                      ↓
+Relationship Graph                    Stage 1: Script Generation
+    ↓                                      ↓
+World / Style Rules                   Stage 2: Storyboard / Shot Planning
+    ↓                                      ↓
+Series Bible JSON ─────────────────→  Stage 3: Visual Asset Generation
+    ↑                                      ↓
+    │  Episode Memory (written back)   Stage 4: Audio Generation
+    └──────────────────────────────── Stage 5: Video Assembly
+                                           ↓
+                                      Final MP4 + Production Package
+```
+## Phase A — Series Bible (Single Source of Truth)
+The Series Bible is the authoritative configuration for the entire series. It is injected in full into every episode generation call. Every stage — script, visuals, audio — reads from it. Characters never need to be re-described per episode.
+
+### Character Schema
+```
+{
+  "character_id":       "char_maya",
+  "name":               "Maya",
+  "age":                28,
+  "visual_description": "South Asian woman, shoulder-length black hair,
+                         often in yellow kurta, warm-toned skin, expressive dark eyes",
+  "reference_images":   ["maya_ref_01.png", "maya_ref_02.png"],
+  "personality_traits": ["optimistic", "impulsive", "loyal", "bad at taking advice"],
+  "speaking_style":     "Fast-paced, metaphor-heavy, ends sentences with rhetorical questions",
+  "behavioral_rules": [
+    "Never admits fear directly — deflects with humour",
+    "Protective of her younger brother Rohan"
+  ],
+  "voice_profile": {
+    "provider":    "ElevenLabs",
+    "voice_id":    "xyz123",
+    "speed":       1.05,
+    "pitch_shift": 0
+  }
+}
+```
+### Relationship Graph (Structured Edges)
+Stored as a directed graph of edge objects. Injected into script generation to enforce interaction consistency — the LLM knows not just who the characters are, but how they relate and where that relationship currently stands.
+```
+{
+  "edges": [
+    {
+      "from":          "char_maya",
+      "to":            "char_rohan",
+      "type":          "sibling",
+      "dynamic":       "protective",
+      "current_state": "supportive but argumentative after last episode's fight"
+    },
+    {
+      "from":          "char_maya",
+      "to":            "char_priya",
+      "type":          "mentor",
+      "dynamic":       "warm",
+      "current_state": "maya increasingly doubts priya's advice"
+    }
+  ]
+}
+```
+### World Rules
+```
+{
+  "setting":          "Urban Indian neighbourhood, present day",
+  "tone":             "Light drama with humour",
+  "recurring_themes": ["family responsibility", "career growth", "self-doubt"]
+}
+```
+### Episode Memory Log 
+After each episode is generated and approved, the system writes a short continuity summary back into the Series Bible. This is what enables true multi-episode coherence, the script LLM in Episode 3 knows what happened in Episodes 1 and 2.
+
+```
+"episode_log": [
+  {
+    "episode_id":    "ep_001",
+    "title":         "The Interview",
+    "summary":       "Maya gets a job offer in another city. Rohan is supportive but hurt.",
+    "relationship_state_changes": [
+      { "edge": "maya→rohan", "new_state": "strained — maya feeling guilty" }
+    ],
+    "unresolved_threads": ["Maya has not yet told her parents about the job offer"]
+  }
+]
+```
+> [!IMPORTANT]
+> **Why this matters:** Without episode memory, the script LLM treats every episode as isolated. With it, character arcs carry forward — Maya's guilt from Episode 1 can surface in Episode 2's dialogue naturally, without the user having to re-explain it in every prompt.
+
+## Phase B — Episode Generation Pipeline
+
+### Stage 1 — Script Generation
+| Stage | Description |
+|-------|------------|
+| Input | Series Bible JSON (full) + episode prompt (situation, cast subset, tone, goal) + `episode_log` (previous episode summaries for continuity). |
+| LLM | GPT-4o or Claude 3.5 Sonnet. Long-context model to hold full Series Bible + episode log without truncation. |
+| Output Schema | JSON array of scenes. Each scene: `scene_id`, `setting`, `characters_present`, `action_description`, `dialogue` [{`character_id`, `line`, `emotion`, `direction`}], `estimated_duration_seconds`. |
+| Pacing Control | Speech duration estimated at 130–150 WPM. Sum of scene durations must be 270–310 seconds (4.5–5.5 min). If over → trim lowest-priority scene. If under → expand a key dialogue exchange. |
+| Character Fidelity | Series Bible fields — `personality_traits`, `speaking_style`, `behavioral_rules` — injected per-character into the prompt. Instruction: “Every dialogue line must be consistent with the character's speaking_style and behavioral_rules above.” Applied to every scene, not just globally. |
+
+### Script Scene Schema
+```
+[
+  {
+    "scene_id":                  1,
+    "setting":                   "Kitchen, morning",
+    "characters_present":        ["char_maya", "char_rohan"],
+    "action_description":        "Morning disagreement about career decision",
+    "estimated_duration_seconds": 65,
+    "dialogue": [
+      { "character_id": "char_maya",  "line": "You think it's that simple?", "emotion": "frustrated", "direction": "turns away" },
+      { "character_id": "char_rohan", "line": "I think you're scared.",       "emotion": "calm",       "direction": "steady eye contact" }
+    ]
+  }
+]
+```
+### Stage 2 — Storyboard / Shot Planning
+| Stage | Description |
+|-------|------------|
+| Input | Generated script JSON. |
+| Process | Second LLM pass produces a shot list. One or more shots per scene. Each shot: `shot_type` (wide/medium/close-up/reaction), `camera_movement` (static/pan/zoom), `characters_in_frame`, `background_description`, `mood/lighting`. Separates narrative logic from visual composition. |
+|| Output | Shot list JSON attached to the episode package. Each shot becomes one image generation call in Stage 3. |
+
+### Stage 3 — Visual Asset Generation
+| Stage | Description |
+|-------|------------|
+| Character Images | Each shot generated via SDXL or DALL-E 3. Prompt = `visual_description` (Series Bible) + emotion + setting + lighting. Reference image fed as IP-Adapter style anchor for face/style consistency. |
+| Backgrounds | Generated separately per unique setting. Reused across shots with the same setting — avoids per-shot inconsistency and reduces generation cost. |
+| CLIP Similarity Gate | Each generated image scored against character reference via CLIP cosine similarity. Images below 0.85 threshold are flagged for user review or auto-regenerated (max 2 retries before escalating to user). |
+
+### **Character Consistency: Layered Strategy**
+
+| Layer | Method | How It Works | Cost |
+|-------|--------|-------------|------|
+| 1 | Textual Anchoring | Detailed `visual_description` injected into every image prompt. Age, skin tone, hair, clothing signature all specified. | Zero — always active |
+| 2 | IP-Adapter | Reference image fed as style/identity anchor at inference time. No training required. | Per-call inference overhead only |
+| 3 | Character LoRA | Fine-tuned LoRA trained on 15–30 reference images per character. Best consistency results. One-time training cost. | One-time GPU training (~30 min) |
+| 4 | CLIP Gating | Cosine similarity vs reference. Score < 0.85 → regenerate (max 2 retries) → escalate to user. | Per-image scoring: negligible |
+
+### Stage 4 — Audio Generation
+| Stage | Description |
+|-------|------------|
+| Dialogue / Voiceover | Each dialogue line sent to ElevenLabs (or Azure Neural TTS) with character's `voice_id` and `speed` from Series Bible. Emotion tags mapped to ElevenLabs expression controls (e.g., `frustrated` → raised energy, faster pace). |
+| Narration | Optional narrator voice for scene transitions. Defined in Series Bible as a separate voice profile if the series uses narration style. |
+| Background Music | Royalty-free track generated or selected (Mubert / Suno AI) based on episode tone tag. Mixed at lower volume than dialogue. Fade-in/fade-out applied at episode start/end. |
+| Audio Sync | TTS audio duration measured programmatically per line. Scene image display duration adjusted to match audio length. Ensures total episode stays within ±10 seconds of 5 minutes — audio is the timing master. |
+
+### Stage 5 — Video Assembly
+| Stage | Description |
+|-------|------------|
+| Composition | FFmpeg or MoviePy. Background image + character images composited as layers per shot. Subtle Ken Burns pan/zoom applied to static images to add motion. Scene transitions: hard cut or 0.5s cross-dissolve based on tone. |
+| Subtitles | Dialogue lines timestamped to TTS audio output. Auto-generated SRT subtitle file. Burnt-in or as a separate track — user selects at export. |
+| Output Formats | 16:9 (YouTube/desktop) or 9:16 (Reels/Shorts). Resolution: 1080p. User selects at episode creation time. |
+| Production Package | ZIP bundle: `final_episode.mp4` + `script.json` + `shot_list.json` + `images/` + `audio/` + `subtitles.srt`. Enables manual re-edit in DaVinci Resolve or Premiere without regenerating assets. |
+
+### Output Package Structure
+```
+episodes/ep_002_the_decision/
+├── final_episode.mp4
+├── script.json
+├── shot_list.json
+├── subtitles.srt
+├── images/
+│   ├── scene_01_shot_01.png
+│   ├── scene_01_shot_02.png
+│   └── scene_02_shot_01.png
+└── audio/
+    ├── maya_line_01.mp3
+    ├── rohan_line_01.mp3
+    └── bgm_episode.mp3
+```
+## Scene-Level Regeneration
+Full episode regeneration is expensive — 5 stages × multiple API calls. The system supports surgical re-generation so users can iterate without restarting the entire pipeline.
+
+| User Action | What Reruns | What Is Skipped |
+|-------------|------------|-----------------|
+| Regenerate scene dialogue | Stage 1 (that scene only) → Stage 4 audio for that scene → Stage 5 re-assembly | All other scenes, all images |
+| Change scene emotion/tone | Stage 1 (that scene) → Stage 3 images for affected shots → Stage 4 audio → Stage 5 | Unaffected scenes and shots |
+| Swap a character from episode | Stage 3 image re-generation for all shots with that character → Stage 5 re-assembly | Script, audio, other characters |
+| Adjust pacing / trim scene | Stage 1 duration recalculation → Stage 5 re-assembly only | All assets — no regeneration cost |
+| Change background music tone | Stage 4 BGM only → Stage 5 re-assembly | All character assets and dialogue |
+> [!Warning]
+> **Cost impact:** Regenerating a single scene's dialogue costs ~5% of a full episode generation. Without scene-level granularity, every small edit forces a full pipeline re-run — unacceptable for iterative content creation.
+
+## Microservice Architecture
+Each stage runs as an independent service. This enables parallel processing, horizontal scaling, and service replacement without affecting the rest of the pipeline.
+
+| Service | Responsibility | Scales With | Replaceable With |
+|----------|---------------|-------------|------------------|
+| Script Service | LLM call → scene JSON | Episode request volume | Any LLM API |
+| Visual Service | Image generation per shot | Shot count (most expensive) | Any T2I model or API |
+| Audio Service | TTS per dialogue line + BGM | Dialogue line count | Any TTS provider |
+| Assembly Service | FFmpeg composition → MP4 | Resolution + scene count | Any video rendering tool |
+| Series Bible Store | JSON versioning + episode log | Series count (lightweight) | Any key-value store |
+
+## Core Challenges & Solutions
+
+| Challenge | Solution |
+|------------|----------|
+| Character visual drift across episodes | 4-layer consistency strategy: textual anchoring → IP-Adapter → LoRA (optional) → CLIP similarity gating at 0.85 threshold |
+| Personality inconsistency in dialogue | `behavioral_rules` + `speaking_style` injected per-character into every scene prompt, not just globally |
+| Duration mismatch | Word-count-based speech estimation (130–150 WPM). Trim/expand pass before finalising script. Audio sync makes TTS the timing master for video assembly |
+| Multi-episode continuity drift | Episode memory log written back to Series Bible after each episode. Unresolved threads and relationship state changes persist as context for the next episode's LLM call |
+| High regeneration cost | Scene-level regeneration: only re-run affected stages for the changed scene. Full pipeline only on new episodes |
+| Partial cast episodes | `cast_subset` field in episode prompt. Script LLM instructed to write only for listed characters; absent characters may be referenced but not present on screen |
+
+## Architecture Summary
+| Stage | Technology | Output | Service |
+|-------|------------|--------|---------|
+| Series Bible | JSON Schema + Web UI | Character/world config + episode log | Series Bible Store |
+| Script Gen | GPT-4o / Claude 3.5 Sonnet | Scene-by-scene script JSON | Script Service |
+| Storyboard | LLM (2nd pass) | Shot list per scene | Script Service |
+| Visuals | SDXL + IP-Adapter / LoRA | Character + background images | Visual Service |
+| Audio | ElevenLabs + Mubert/Suno | Dialogue audio + BGM | Audio Service |
+| Video Assembly | FFmpeg / MoviePy | Final 5-min MP4 + package ZIP | Assembly Service |
+
+> [!TIP]
+> **Key design principle:** The Series Bible is the single source of truth, injected into every stage of every episode. Episode Memory ensures the series has a living continuity: what happened in Episode 1 shapes how characters behave in Episode 5, without the user having to re-explain it every time.
