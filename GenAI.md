@@ -499,7 +499,209 @@ Submit a **proposal** for building this system using GenAI (OpenAI/Gemini) for �
 
 ### Your Solution for problem 3:
 
-You need to put your solution here.
+## Problem 3 — Smart DOCX Template → Bulk DOCX/PDF Generator
+
+Users maintain Word templates (offer letters, invoices, certificates, contracts) where only a handful of fields change per document. The system detects editable fields via AI, then handles single and bulk generation with deterministic rendering — no hallucinations, no formatting loss.
+
+| Principle | What It Means Here |
+|-----------|-------------------|
+| LLM Containment | LLM is invoked exactly once — for field detection only. Every other step (rendering, validation, PDF conversion) is deterministic. Zero hallucination risk in final documents. |
+| Deterministic Rendering | python-docxtpl (Jinja2) replaces only placeholders. Original DOCX XML — tables, headers, footers, logos, signatures — is never touched. |
+| Schema Versioning | Every confirmed template gets a version stamp. Bulk jobs record which version was used. Critical for auditing offer letters, contracts, compliance docs. |
+| Row-Level Failure Isolation | A single bad spreadsheet row does not abort the batch. The job continues; the report flags every failure independently. |
+| Template Injection Defense ▸ NEW | User-supplied field values are sanitized before Jinja2 rendering. Jinja2 control characters (`{% %}`, `{{ }}`, `{# #}`) are escaped to prevent template injection attacks that could break rendering or expose config data. |
+| Streaming ZIP ▸ NEW | ZIP bundle is streamed to disk as files are rendered — not assembled in memory. Prevents OOM errors on large batches (hundreds/thousands of rows). |
+| Data Minimisation | Spreadsheet row data is processed in memory and discarded after the job. It is never persisted to the database — only the generation report is retained. |
+| Auditability | Each bulk job produces a structured job summary JSON alongside the CSV report. Supports SLA tracking and compliance reporting. |
+
+## High-Level Architecture
+```
+User Upload DOCX
+        ↓
+Text Extraction Layer
+        ↓
+LLM Field Detection
+        ↓
+Field Schema Confirmation
+        ↓
+Template Conversion (Placeholder Injection)
+        ↓
+-------------------------------------------
+Single Generation Flow:
+Form Input → Validation → Render → DOCX/PDF Download
+
+Bulk Generation Flow:
+Excel/Sheet Upload → Row Validation → Parallel Rendering → ZIP Bundle + Report
+```
+## Phase 1 — Template Creation (AI-Assisted Field Detection)
+### Step 1: Document Upload & Extraction
+| Item | Description |
+|------|------------|
+| Tool | python-docx |
+| What is extracted | Full text with paragraph boundaries and table cell context preserved. Repeated values flagged for `appears_multiple_times` detection. |
+| What is NOT sent to LLM | Raw file bytes, images, embedded fonts, binary data. Only the extracted text string is sent. |
+
+### Step 2 — LLM Field Detection Prompt
+LLM is used exactly once. The prompt enforces a strict JSON-only response:
+```
+SYSTEM:
+You are a document analysis AI. Your only job is to identify fields that
+change between different instances of this template document.
+Return a JSON array only — no explanation, no markdown, no extra keys.
+ 
+Each object in the array must match this schema exactly:
+[
+  {
+    "field_key":             "snake_case_identifier",
+    "display_label":         "Human Readable Label",
+    "field_type":            "text | date | currency | number | email | boolean",
+    "sample_value":          "<value as it appears in the document>",
+    "context_hint":          "<where/how this field appears>",
+    "required":              true | false,
+    "appears_multiple_times": true | false
+  }
+]
+ 
+Rules:
+1. Only extract values that realistically differ per document instance.
+   >(names, dates, amounts, roles, addresses, IDs)
+2. Do NOT extract: document title, company name, static boilerplate,
+   >unless they explicitly vary per instance.
+3. If a value appears multiple times (e.g. candidate name in greeting AND signature), set appears_multiple_times: true.
+   >The system will replace all occurrences.
+4. Return the JSON array only. No other text.
+```
+### Step 3 — Schema Confirmation UI
+| Item | Description |
+|------|------------|
+| User actions | Add missed fields, remove false positives, rename labels, change field types, mark optional vs required, set date format / currency symbol. |
+| Output | Confirmed fields saved as `template_schema.json`. DOCX converted to Jinja2 template via exact string replacement (not a second LLM call). |
+| Version stamp | First confirmation = version 1.0. Any schema edit increments the minor version. Major structural changes prompt user to confirm a new major version. |
+
+### Template Schema (Saved JSON)
+```
+{
+  "template_id":  "offer_letter",
+  "version":      "1.0",
+  "created_at":   "2026-02-10T09:00:00Z",
+  "fields": [
+    {
+      "field_key":             "candidate_name",
+      "display_label":         "Candidate Full Name",
+      "field_type":            "text",
+      "required":              true,
+      "appears_multiple_times": true
+    },
+    {
+      "field_key":   "start_date",
+      "display_label":"Start Date",
+      "field_type":  "date",
+      "format":      "DD MMMM YYYY",
+      "required":    true
+    },
+    {
+      "field_key":      "salary_annual",
+      "display_label":  "Annual Salary",
+      "field_type":     "currency",
+      "currency_symbol":"₹",
+      "required":       true
+    }
+  ]
+}
+```
+## Phase 2 — Single Document Generation
+### Pipeline
+| Stage | Description |
+|-------|------------|
+| Select Template | User picks a saved template. Form is auto-generated from the field schema — date picker for date fields, currency input for currency, etc. |
+| Client Validation | Required field check, type validation (date format, numeric range). Runs in browser before any network call. |
+| Server Validation | Re-validates all fields server-side before rendering. Type enforcement, sanitization. Never trust client-side validation alone. |
+| Injection Sanitize | Jinja2 control characters (`{% %}`, `{{ }}`, `{# #}`) are escaped in every field value before the render call. Prevents template injection — a docxtpl-specific attack vector where a user submits a malicious Jinja2 expression as a field value. |
+| Render DOCX | python-docxtpl renders the Jinja2 template with sanitized values. Original formatting — tables, headers/footers, logos, signatures — is untouched. |
+| Convert to PDF | LibreOffice headless: `soffice --headless --convert-to pdf`. Spawned as a subprocess per document. |
+| Download | DOCX and/or PDF served as a file download. Filename: `<CandidateName>_<TemplateName>_<YYYYMMDD>.<ext>` — pattern configurable in template settings. |
+
+## Phase 3 — Bulk Document Generation
+
+### Spreadsheet Interface
+The system generates a downloadable Excel template where column headers exactly match field_key values (with display_label as a comment on the header cell). The user fills one row per document. For Google Sheets, the user provides a share link, the system reads it via Google Sheets API.
+
+### Pipeline
+| Stage | Description |
+|-------|------------|
+| Parse Sheet | Read Excel (openpyxl) or Google Sheet rows. Map column headers to `field_key` values from schema. Flag unrecognised columns as warnings in the report. |
+| Row Validation | Each row validated independently. Checks: required fields present, type correctness, date format parseable, numeric fields numeric. Invalid rows are flagged and skipped — the batch continues. |
+| Sanitize (per row) | Jinja2 control characters escaped in every field value of every row before any render call. Applied uniformly regardless of source (Excel or Sheets). |
+| Parallel Render | Configurable worker pool (default: CPU count). Each valid row: render DOCX → convert PDF. Worker failures are caught per-row and logged to the report without stopping other workers. |
+| Streaming ZIP | Files are written into the ZIP bundle as they are rendered — not buffered in memory first. Prevents OOM errors on large batches. ZIP streamed to disk and made available for download when all rows are done. |
+| Report Generation | CSV report: `row_number`, `status`, `file_name`, `error_reason`. Job summary JSON: `rows_total`, `rows_success`, `rows_failed`, `processing_time_seconds`, `template_version`. Both are included in the ZIP and shown as a summary table in the UI. |
+
+## ZIP Output Structure
+```
+generated_docs/
+└── offer_letter_v1.0_2026-02-10/
+    ├── pdf/
+    │   ├── Rohan_Sharma_OfferLetter_20260210.pdf
+    │   ├── Super_Man_OfferLetter_20260210.pdf
+    │   └── Anjali_Pathania_OfferLetter_20260210.pdf
+    ├── docx/
+    │   ├── Rohan_Sharma_OfferLetter_20260210.docx
+    │   └── Super_Man_OfferLetter_20260210.docx
+    ├── generation_report.csv
+    └── job_summary.json
+```
+## Generation Report (CSV + UI Table)
+| Row  | Status     | File Name                                   | Error Reason                  |
+|-------|------------|--------------------------------------------|--------------------------------|
+| 1     | ✓ Success  | Rohan_Sharma_OfferLetter_20260210.pdf        | —                           |
+| 2     | ✓ Success  | Super_Man_OfferLetter_20260210.pdf      | —                                |
+| 3     | ✗ Skipped  | —                                          | Missing required field: salary_annual |
+| 4     | ✗ Skipped  | —                                          | Invalid date format: start_date     |
+| 5     | ✓ Success  | Anjali_Pathania_OfferLetter_20260210.pdf        | —                        |
+
+## Job Summary JSON
+
+```
+{
+  "template_id":             "offer_letter",
+  "template_version":        "1.0",
+  "job_id":                  "bulk_20260210_001",
+  "rows_total":              120,
+  "rows_success":            115,
+  "rows_skipped":            5,
+  "processing_time_seconds": 48,
+  "generated_at":            "2026-02-10T11:23:00Z"
+}
+```
+## Security Boundaries
+| Threat | Mitigation |
+|--------|------------|
+| Template Injection | All field values sanitized before Jinja2 render. Jinja2 control sequences (`{% %}`, `{{ }}`, `{# #}`) are HTML-escaped or stripped. Sandbox mode enabled in Jinja2 environment to prevent code execution. |
+| Malicious DOCX upload | File type validated by magic bytes (not extension). DOCX unpacked and inspected before processing. Macro-enabled `.docm` files rejected. |
+| Google Sheets data exposure | Service account scoped to read-only. Credentials stored in server environment variables, never in client code or logs. |
+| Spreadsheet data retention | Row data processed in memory only. Never written to the database. Only the job summary and error report are retained. |
+| Rendered document access | Download links are signed, time-limited URLs (expire after 30 minutes). Generated files deleted from server after download or after 24h. |
+
+## Scalability & Observability
+
+| Component | Description |
+|-----------|------------|
+| Worker Pool | Configurable concurrency (default: CPU count). Each worker handles one row end-to-end (validate → render → PDF). Worker failures are isolated — no shared state between rows. |
+| Streaming ZIP | Files streamed into ZIP as they complete. No full batch buffer in memory. Handles batches of thousands of rows without OOM risk. |
+| Job Queue | Bulk jobs tracked in a lightweight job table (SQLite for single-server, Redis/Postgres for multi-server). Supports retry and resume if server restarts mid-batch. |
+| Horizontal Scaling | Workers are stateless — can be run on separate machines. Job queue acts as the coordinator. ZIP assembly happens on the output server. |
+| LibreOffice Pool | LibreOffice headless has a high startup cost (~1–2 sec per process). Production setup maintains a warm pool of LibreOffice instances to eliminate per-document startup latency. |
+
+## Why This Architecture Works
+> [!IMPORTANT]
+> **LLM is a scalpel, not a paintbrush:** Used once, for the one task where creative inference is needed (field detection). Everything else — rendering, validation, PDF conversion, report generation — is deterministic. This makes the system safe to run at scale on legal and financial documents.
+
+> [!NOTE]
+> **Schema versioning = auditability:** Every bulk job records which template version was used. If an offer letter is disputed 6 months later, you can replay exactly which fields and which template were active at generation time.
+
+> [!CAUTION]
+> **Template injection is a real risk:** docxtpl uses Jinja2 under the hood. A user who submits {% for x in config %} as a field value can crash the render or expose internal configuration. Sanitization and Jinja2 sandbox mode are non-negotiable in production.
+
 
 ## Problem 4: Architecture Proposal for 5-Min Character Video Series Generator
 
