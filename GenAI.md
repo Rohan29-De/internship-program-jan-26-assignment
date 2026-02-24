@@ -365,7 +365,7 @@ Rules you must follow at all times:
 7. LinkedIn formatting: use \n\n between paragraphs. No markdown headers.
    Emojis only if emoji_preference is 'yes' or 'sometimes'.
 8. All three posts must be ready to publish — no [brackets], no placeholders.
-9. 9. If topic_context is empty and the topic is ambiguous, do not fabricate assumptions. Instead, interpret the topic generically and avoid specific claims.
+9. If topic_context is empty and the topic is ambiguous, do not fabricate assumptions. Instead, interpret the topic generically and avoid specific claims.
 ```
 
 ### STYLE DEFINITIONS (part of system prompt)
