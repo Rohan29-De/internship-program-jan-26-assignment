@@ -232,6 +232,14 @@ output/<video_name>/
     ├── highlight_01.jpg
     └── highlight_02.jpg
 ```
+
+### LLM Failure Handling Strategy
+
+- Each chunk-level LLM call has retry logic (max 3 attempts with exponential backoff).
+- If a single chunk fails permanently, that chunk is marked `FAILED` and excluded from meta-summary.
+- The final Summary.md includes a warning section listing any skipped chunks.
+- The job does not fail entirely due to a single chunk failure.
+
 ## 3. Fully Offline Solution
 All components run locally:
 * Transcription: faster-whisper
@@ -303,7 +311,7 @@ Design a **single zero-shot prompt** that takes a user’s persona configuration
 
 **TASK:** Write a prompt that can work.
 
-### Problem 2 — Zero-Shot Prompt: LinkedIn Post Generator
+## Problem 2 — Zero-Shot Prompt: LinkedIn Post Generator
 
 A single prompt call (no fine-tuning, no multi-turn) that accepts a user persona configuration + a topic and returns 3 structurally distinct, LinkedIn-ready post drafts as directly parseable JSON.
 
@@ -357,6 +365,7 @@ Rules you must follow at all times:
 7. LinkedIn formatting: use \n\n between paragraphs. No markdown headers.
    Emojis only if emoji_preference is 'yes' or 'sometimes'.
 8. All three posts must be ready to publish — no [brackets], no placeholders.
+9. 9. If topic_context is empty and the topic is ambiguous, do not fabricate assumptions. Instead, interpret the topic generically and avoid specific claims.
 ```
 
 ### STYLE DEFINITIONS (part of system prompt)
@@ -908,6 +917,16 @@ Full episode regeneration is expensive — 5 stages × multiple API calls. The s
 | Change background music tone | Stage 4 BGM only → Stage 5 re-assembly | All character assets and dialogue |
 > [!Warning]
 > **Cost impact:** Regenerating a single scene's dialogue costs ~5% of a full episode generation. Without scene-level granularity, every small edit forces a full pipeline re-run — unacceptable for iterative content creation.
+
+## Cost Considerations
+
+Image generation is the dominant cost driver (per-shot calls).
+To control cost:
+- Reuse background images across scenes when setting unchanged.
+- Cache character expressions where emotion is repeated.
+- Limit regeneration retries to a maximum threshold.
+- Allow “Script + Asset Package Only” mode without auto-rendering final MP4.
+
 
 ## Microservice Architecture
 Each stage runs as an independent service. This enables parallel processing, horizontal scaling, and service replacement without affecting the rest of the pipeline.
