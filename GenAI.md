@@ -31,7 +31,7 @@ No code required. We want a **clear, practical proposal** with architecture and 
 **How it works:** Upload videos to an AI-powered SaaS platform (e.g. Grain, Otter.ai, Fireflies, AssemblyAI video pipeline). The platform handles transcription, summarisation, and chapter generation automatically through its hosted API.
 
 ### Architecture
-```
+```text
 Local Video → Upload → SaaS Transcription → SaaS Summarization → Export → Post-processing
 ```
 | Stage            | SaaS Provider Workflow |
@@ -61,7 +61,7 @@ Small, non-sensitive workloads where speed matters more than cost control.
 Local media processing + Cloud LLM for structured summarization
 **How it works**: All media processing (transcription, clip cutting, screenshot extraction) runs locally using open-source tools (Whisper, FFmpeg, OpenCV). Only the text transcript is sent to a cloud LLM (OpenAI GPT-4o / Gemini 1.5 Pro) for intelligent summarisation and highlight detection. This is my recommended approach.
 ### High-Level Architecture
-```
+```test
 Batch Orchestrator
     ↓
 Proxy Video Generation (Bitrate Laddering)
@@ -99,7 +99,7 @@ Markdown + Report Generation
 ### Production Optimizations
 1. **Bitrate Laddering (Compute Optimization)**
    Instead of processing full-resolution video:
-   ```
+   ```bash
    ffmpeg -i input.mp4 -vf scale=-2:480 -c:v libx264 -preset veryfast proxy.mp4
    ```
    * Proxy (480p) used for screenshots and frame sampling
@@ -130,7 +130,7 @@ Markdown + Report Generation
 
   3. **Timestamp Confidence Scoring**
      Each highlight includes a computed confidence score:
-```
+```json
   {
   "title": "Core Architecture Decision",
   "start_time": "01:12:33",
@@ -159,7 +159,7 @@ Estimated cost per 3-hour video:
 
 5. **Idempotent Batch Processing**
    Each video maintains processing state:
-```
+```json
    {
   "video_id": "video_001",
   "status": "TRANSCRIBED",
@@ -179,7 +179,7 @@ Estimated cost per 3-hour video:
 * FAILED
  
 If the pipeline is interrupted at any stage, the batch orchestrator resumes from the last completed stage — no reprocessing of already-finished steps
-```
+```text
 INGESTED
    ↓
 PROXY_GENERATED 
@@ -200,7 +200,7 @@ COMPLETED
 
 6. **Observability & Cost Reporting**
    Each video generates:
-   ```
+   ```json
    processing_report.json 
    ```
 Includes:
@@ -211,7 +211,7 @@ Includes:
 * Highlight count
 
 Example:
-```
+```javacript
 Video: product_masterclass.mp4
 Duration: 3h 18m
 Transcription Time: 12m
@@ -221,7 +221,7 @@ Highlights: 11
 Avg Confidence: 0.83
 ```
 ### Output Folder Structure
-```
+```text
 output/<video_name>/
 ├── Summary.md
 ├── processing_report.json
@@ -329,7 +329,7 @@ A single prompt call (no fine-tuning, no multi-turn) that accepts a user persona
 
 ## The Prompt
 ### SYSTEM PROMPT
-```
+```javascript
 You are a professional LinkedIn ghostwriter and content strategist.
 Your only job is to produce valid JSON — nothing else.
 Do not include any text, explanation, or markdown outside the JSON object.
@@ -369,7 +369,7 @@ Rules you must follow at all times:
 ```
 
 ### STYLE DEFINITIONS (part of system prompt)
-```
+```javascript
 STYLE 1 — "punchy_insight"
   Structure:
   - Hook: one strong declarative sentence.
@@ -397,7 +397,7 @@ STYLE 3 — "actionable_checklist"
 ```
 
 ### USER PROMPT (filled per API call)
-```
+```javascript
 Generate 3 LinkedIn post drafts using the persona and topic below.
  
 === PERSONA ===
@@ -438,7 +438,7 @@ goal:          {{goal}}
 The prompt alone is not sufficient — the API call must also enforce JSON mode. Both layers together make malformed output practically impossible.
 
 ### OpenAI 
-```
+```javascript
 const response = await openai.chat.completions.create({
   model: "gpt-4o",
   response_format: { type: 'json_object' },   // ← API-level JSON enforcement
@@ -452,7 +452,7 @@ const posts = JSON.parse(response.choices[0].message.content).posts;
 ```
 
 ### Gemini
-```
+```javascript
 const response = await model.generateContent({
   generationConfig: {
     responseMimeType: "application/json",      // ← API-level JSON enforcement
@@ -524,7 +524,7 @@ Users maintain Word templates (offer letters, invoices, certificates, contracts)
 | Auditability | Each bulk job produces a structured job summary JSON alongside the CSV report. Supports SLA tracking and compliance reporting. |
 
 ## High-Level Architecture
-```
+```text
 User Upload DOCX
         ↓
 Text Extraction Layer
@@ -552,7 +552,7 @@ Excel/Sheet Upload → Row Validation → Parallel Rendering → ZIP Bundle + Re
 
 ### Step 2 — LLM Field Detection Prompt
 LLM is used exactly once. The prompt enforces a strict JSON-only response:
-```
+```javascript
 SYSTEM:
 You are a document analysis AI. Your only job is to identify fields that
 change between different instances of this template document.
@@ -588,7 +588,7 @@ Rules:
 | Version stamp | First confirmation = version 1.0. Any schema edit increments the minor version. Major structural changes prompt user to confirm a new major version. |
 
 ### Template Schema (Saved JSON)
-```
+```json
 {
   "template_id":  "offer_letter",
   "version":      "1.0",
@@ -646,7 +646,7 @@ The system generates a downloadable Excel template where column headers exactly 
 | Report Generation | CSV report: `row_number`, `status`, `file_name`, `error_reason`. Job summary JSON: `rows_total`, `rows_success`, `rows_failed`, `processing_time_seconds`, `template_version`. Both are included in the ZIP and shown as a summary table in the UI. |
 
 ## ZIP Output Structure
-```
+```text
 generated_docs/
 └── offer_letter_v1.0_2026-02-10/
     ├── pdf/
@@ -670,7 +670,7 @@ generated_docs/
 
 ## Job Summary JSON
 
-```
+```json
 {
   "template_id":             "offer_letter",
   "template_version":        "1.0",
@@ -732,7 +732,7 @@ Users define a cast of characters once with reference images, personality, voice
 | A — Series Bible Setup (one-time) | Character definition, relationship graph, world/style rules. Stored as versioned JSON. Injected into every episode generation call as the single source of truth. |
 | B — Episode Generation (per episode) | User provides a short story prompt → system runs a 5-stage pipeline: Script → Storyboard → Visuals → Audio → Video Assembly. Each stage is an independent service. |
 
-```
+```text
 PHASE A (one-time)                    PHASE B (per episode)
 ─────────────────────                 ──────────────────────────────────────────
 Character Setup                       Episode Prompt
@@ -752,7 +752,7 @@ Series Bible JSON ─────────────────→  Stage 
 The Series Bible is the authoritative configuration for the entire series. It is injected in full into every episode generation call. Every stage — script, visuals, audio — reads from it. Characters never need to be re-described per episode.
 
 ### Character Schema
-```
+```json
 {
   "character_id":       "char_maya",
   "name":               "Maya",
@@ -776,7 +776,7 @@ The Series Bible is the authoritative configuration for the entire series. It is
 ```
 ### Relationship Graph (Structured Edges)
 Stored as a directed graph of edge objects. Injected into script generation to enforce interaction consistency — the LLM knows not just who the characters are, but how they relate and where that relationship currently stands.
-```
+```json
 {
   "edges": [
     {
@@ -797,7 +797,7 @@ Stored as a directed graph of edge objects. Injected into script generation to e
 }
 ```
 ### World Rules
-```
+```json
 {
   "setting":          "Urban Indian neighbourhood, present day",
   "tone":             "Light drama with humour",
@@ -807,7 +807,7 @@ Stored as a directed graph of edge objects. Injected into script generation to e
 ### Episode Memory Log 
 After each episode is generated and approved, the system writes a short continuity summary back into the Series Bible. This is what enables true multi-episode coherence, the script LLM in Episode 3 knows what happened in Episodes 1 and 2.
 
-```
+```json
 "episode_log": [
   {
     "episode_id":    "ep_001",
@@ -835,7 +835,7 @@ After each episode is generated and approved, the system writes a short continui
 | Character Fidelity | Series Bible fields — `personality_traits`, `speaking_style`, `behavioral_rules` — injected per-character into the prompt. Instruction: “Every dialogue line must be consistent with the character's speaking_style and behavioral_rules above.” Applied to every scene, not just globally. |
 
 ### Script Scene Schema
-```
+```json
 [
   {
     "scene_id":                  1,
@@ -890,7 +890,7 @@ After each episode is generated and approved, the system writes a short continui
 | Production Package | ZIP bundle: `final_episode.mp4` + `script.json` + `shot_list.json` + `images/` + `audio/` + `subtitles.srt`. Enables manual re-edit in DaVinci Resolve or Premiere without regenerating assets. |
 
 ### Output Package Structure
-```
+```text
 episodes/ep_002_the_decision/
 ├── final_episode.mp4
 ├── script.json
